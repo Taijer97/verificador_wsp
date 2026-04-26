@@ -1,0 +1,18 @@
+services:
+  api:
+    build: .
+    container_name: wsp-verificacion-api
+    ports:
+      - "3009:3009"
+    env_file:
+      - .env
+    shm_size: "256mb"
+    volumes:
+      - wwebjs_auth:/app/.wwebjs_auth
+      - wwebjs_cache:/app/.wwebjs_cache
+    user: "0:0"
+    restart: unless-stopped
+
+volumes:
+  wwebjs_auth:
+  wwebjs_cache:

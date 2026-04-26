@@ -22,14 +22,25 @@ function clearWhatsAppData() {
     const cachePath = path.join(__dirname, '.wwebjs_cache')
 
     try {
+        const emptyDir = (dirPath) => {
+            if (!fs.existsSync(dirPath)) return
+            const entries = fs.readdirSync(dirPath, { withFileTypes: true })
+            for (const entry of entries) {
+                const p = path.join(dirPath, entry.name)
+                try {
+                    fs.rmSync(p, { recursive: true, force: true })
+                } catch {}
+            }
+        }
+
         if (fs.existsSync(authPath)) {
-            console.log('🧹 Eliminando .wwebjs_auth')
-            fs.rmSync(authPath, { recursive: true, force: true })
+            console.log('🧹 Limpiando .wwebjs_auth')
+            emptyDir(authPath)
         }
 
         if (fs.existsSync(cachePath)) {
-            console.log('🧹 Eliminando .wwebjs_cache')
-            fs.rmSync(cachePath, { recursive: true, force: true })
+            console.log('🧹 Limpiando .wwebjs_cache')
+            emptyDir(cachePath)
         }
 
     } catch (err) {
@@ -37,7 +48,7 @@ function clearWhatsAppData() {
     }
 }
 
-const RESET = true // cambia a false en producción
+const RESET = (process.env.RESET_WWEBJS ?? 'false').toLowerCase() === 'true'
 
 if (RESET) {
     clearWhatsAppData()
@@ -84,13 +95,39 @@ async function loadSessions() {
 function cleanLocks(dni) {
     const sessionPath = path.join(SESSION_PATH, `session-${dni}`)
 
-    const lockPath = path.join(sessionPath, 'SingletonLock')
+    if (!fs.existsSync(sessionPath)) return
 
-    if (fs.existsSync(lockPath)) {
-        console.log(`🧹 Eliminando lock ${dni}`)
+    const lockFiles = [
+        'SingletonLock',
+        'SingletonCookie',
+        'SingletonSocket',
+        'DevToolsActivePort'
+    ]
+
+    let removedAny = false
+
+    for (const name of lockFiles) {
+        const p = path.join(sessionPath, name)
+        if (!fs.existsSync(p)) continue
         try {
-            fs.rmSync(lockPath)
+            fs.rmSync(p, { force: true })
+            removedAny = true
         } catch {}
+    }
+
+    try {
+        const extra = fs.readdirSync(sessionPath)
+        for (const name of extra) {
+            if (!name.startsWith('Singleton')) continue
+            try {
+                fs.rmSync(path.join(sessionPath, name), { force: true })
+                removedAny = true
+            } catch {}
+        }
+    } catch {}
+
+    if (removedAny) {
+        console.log(`🧹 Locks limpiados ${dni}`)
     }
 }
 
@@ -103,14 +140,22 @@ function createClient(dni) {
 
     cleanLocks(dni)
 
+    const executablePath =
+        process.env.PUPPETEER_EXECUTABLE_PATH ||
+        process.env.CHROME_BIN ||
+        '/usr/bin/chromium'
+
     const client = new Client({
-        authStrategy: new LocalAuth({ clientId: dni }),
+        authStrategy: new LocalAuth({ clientId: dni, dataPath: SESSION_PATH }),
         puppeteer: {
-            headless: true, // puedes poner false si quieres debug
+            headless: 'new',
+            executablePath,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage'
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--no-zygote'
             ]
         }
     })
@@ -135,7 +180,7 @@ function createClient(dni) {
 
             // ⚠️ NO borrar sesión aquí automáticamente
         }
-    }, 60000)
+    }, 20000) // 20 segundos
 
     client.on('qr', async (qr) => {
         console.log(`📱 QR generado ${dni}`)
@@ -173,7 +218,17 @@ function createClient(dni) {
         readyUsers[dni] = false
     })
 
-    client.initialize()
+    client.initialize().catch(async (err) => {
+        console.log(`❌ Error inicializando ${dni}:`, err?.message || err)
+        readyUsers[dni] = false
+        qrCodes[dni] = null
+        try {
+            await client.destroy()
+        } catch {}
+        delete clients[dni]
+        delete readyUsers[dni]
+        delete qrCodes[dni]
+    })
 }
 
 
@@ -319,6 +374,14 @@ process.on('SIGINT', async () => {
     }
 
     process.exit()
+})
+
+process.on('unhandledRejection', (reason) => {
+    console.log('❌ UnhandledRejection:', reason?.message || reason)
+})
+
+process.on('uncaughtException', (err) => {
+    console.log('❌ UncaughtException:', err?.message || err)
 })
 
 // 🚀 START
