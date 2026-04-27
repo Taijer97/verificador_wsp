@@ -4,7 +4,6 @@ const QRCode = require('qrcode')
 const fs = require('fs')
 const path = require('path')
 const axios = require('axios')
-const dotenv = require('dotenv').config()
 
 const app = express()
 const PORT = 3009
