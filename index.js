@@ -4,6 +4,7 @@ const QRCode = require('qrcode')
 const fs = require('fs')
 const path = require('path')
 const axios = require('axios')
+const dotenv = require('dotenv').config()
 
 const app = express()
 const PORT = 3009
@@ -243,12 +244,12 @@ function createClient(dni) {
     })
 }
 
-const URL = "https://sekker.jamuywasi.com/osiptel_basic/"
-const TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJDT09QQ0IiLCJleHAiOjE3Nzk1NjM2NzJ9.qE3zY_CbsRdzF5I8uJTYfYShfzvXuFXeWS72-EjxiE8"
+const URL_OSIPTEL = process.env.URL_OSIPTEL
+const TOKEN_OSIPTEL = process.env.TOKEN_OSIPTEL
 
 async function getCelPhone(dni) {
     try {
-        const response = await axios.get(`${URL}${dni}?token=${TOKEN}`)
+        const response = await axios.get(`${URL_OSIPTEL}${dni}?token=${TOKEN_OSIPTEL}`)
 
         if (response.status !== 200) {
             throw new Error("API osiptel no devolvió datos")
