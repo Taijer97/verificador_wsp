@@ -10,6 +10,7 @@ RUN apt-get update \
     chromium \
     ca-certificates \
     fonts-liberation \
+  && if [ -x /usr/bin/chromium-browser ] && [ ! -x /usr/bin/chromium ]; then ln -s /usr/bin/chromium-browser /usr/bin/chromium; fi \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

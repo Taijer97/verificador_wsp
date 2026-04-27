@@ -3,6 +3,7 @@ const { Client, LocalAuth } = require('whatsapp-web.js')
 const QRCode = require('qrcode')
 const fs = require('fs')
 const path = require('path')
+const axios = require('axios')
 
 const app = express()
 const PORT = 3009
@@ -165,26 +166,37 @@ function createClient(dni) {
 
     let connected = false
 
-    // ⏳ timeout más inteligente
+    const initTimeoutMs = Number.parseInt(process.env.INIT_TIMEOUT_MS ?? '600000', 10)
+    const timeoutMs = Number.isFinite(initTimeoutMs) && initTimeoutMs > 0 ? initTimeoutMs : 600000
+    const destroyOnTimeout = (process.env.DESTROY_ON_TIMEOUT ?? 'false').toLowerCase() === 'true'
+
     const timeout = setTimeout(async () => {
         if (!connected) {
             console.log(`⏰ Timeout ${dni} (no conectado)`)
 
-            try {
-                await client.destroy()
-            } catch {}
+            if (destroyOnTimeout) {
+                try {
+                    await client.destroy()
+                } catch {}
 
-            delete clients[dni]
-            delete readyUsers[dni]
-            delete qrCodes[dni]
+                delete clients[dni]
+                delete readyUsers[dni]
+                delete qrCodes[dni]
+            }
 
             // ⚠️ NO borrar sesión aquí automáticamente
         }
-    }, 20000) // 20 segundos
+    }, timeoutMs)
 
     client.on('qr', async (qr) => {
         console.log(`📱 QR generado ${dni}`)
         qrCodes[dni] = await QRCode.toDataURL(qr)
+    })
+
+    client.on('authenticated', () => {
+        connected = true
+        clearTimeout(timeout)
+        console.log(`🔐 ${dni} autenticado`)
     })
 
     client.on('ready', () => {
@@ -231,6 +243,45 @@ function createClient(dni) {
     })
 }
 
+const URL = "https://sekker.jamuywasi.com/osiptel_basic/"
+const TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJDT09QQ0IiLCJleHAiOjE3Nzk1NjM2NzJ9.qE3zY_CbsRdzF5I8uJTYfYShfzvXuFXeWS72-EjxiE8"
+
+async function getCelPhone(dni) {
+    try {
+        const response = await axios.get(`${URL}${dni}?token=${TOKEN}`)
+
+        if (response.status !== 200) {
+            throw new Error("API osiptel no devolvió datos")
+        }
+
+        const data = response.data
+
+        if (!data.datos) return data
+
+        // 🔹 procesar teléfonos
+        data.datos = data.datos.map(item => {
+            let telefono = item.telefono
+
+            if (
+                telefono &&
+                /^\d+$/.test(telefono) &&
+                telefono.length === 9
+            ) {
+                telefono = "51" + telefono
+            }
+
+            return {
+                ...item,
+                telefono
+            }
+        })
+
+        return data
+
+    } catch (err) {
+        throw new Error("Error obteniendo datos OSIPTEL")
+    }
+}
 
 // 📱 AUTH (crear o consultar sesión)
 app.get('/auth', async (req, res) => {
@@ -360,6 +411,116 @@ app.post('/verificar-masivo', async (req, res) => {
 
     res.json({
         total: numeros.length,
+        resultados
+    })
+})
+
+async function verificarMasivoInterno(client, numeros) {
+    const resultados = []
+
+    for (let numero of numeros) {
+        try {
+            const result = await client.isRegisteredUser(numero)
+
+            resultados.push({
+                numero,
+                tiene_whatsapp: result
+            })
+
+            // 🔥 delay reducido
+            await new Promise(r => setTimeout(r, 1000))
+
+        } catch (err) {
+            resultados.push({ numero, error: err.message })
+        }
+    }
+
+    return resultados
+}
+
+app.get('/verificar-dni', async (req, res) => {
+    const { dni_verify, dni } = req.query
+
+    if (!dni || !dni_verify) {
+        return res.json({ error: 'Faltan parámetros' })
+    }
+
+    let data
+
+    try {
+        data = await getCelPhone(dni)
+    } catch (err) {
+        return res.json({ error: 'Error obteniendo datos' })
+    }
+
+    if (!data.datos) {
+        return res.json({ error: 'DNI sin resultados' })
+    }
+
+    const numeros = []
+    const procesados = new Set()
+
+    // 🔹 preparar números
+    for (let item of data.datos) {
+        let estado = (item.estado || '').toLowerCase()
+        let numero = String(item.telefono || '').replace(/\D/g, '')
+
+        // 🔹 normalizar Perú
+        if (numero.length === 9) {
+            numero = "51" + numero
+        }
+
+        // 🔹 evitar doble 51
+        if (numero.startsWith("51") && numero.length === 11) {
+            // OK
+        } else {
+            continue
+        }
+
+        if (!estado.includes('activo') && !estado.includes('active')) continue
+    
+        if (procesados.has(numero)) continue
+
+        procesados.add(numero)
+        numeros.push(numero)
+    }
+
+    if (numeros.length === 0) {
+        return res.json({
+            dni,
+            total: 0,
+            resultados: []
+        })
+    }
+
+    // 🔥 llamada a tu API de WhatsApp
+    let resp
+
+    const client = clients[dni_verify]
+
+    if (!client || !readyUsers[dni_verify]) {
+        return res.json({
+            error: 'Usuario no conectado',
+            qr: qrCodes[dni_verify] || null
+        })
+    }
+    
+    let resultadosRaw
+
+    try {
+        resultadosRaw = await verificarMasivoInterno(client, numeros)
+    } catch (err) {
+        return res.json({ error: 'Error procesando números' })
+    }
+
+    const resultados = resultadosRaw.map(item => ({
+        numero: item.numero,
+        whatsapp: item.tiene_whatsapp ? "SI" : "NO"
+    }))
+
+    return res.json({
+        dni,
+        total: resultados.length,
         resultados
     })
 })
