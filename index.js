@@ -1,3 +1,5 @@
+require('dotenv').config()
+
 const express = require('express')
 const { Client, LocalAuth } = require('whatsapp-web.js')
 const QRCode = require('qrcode')
@@ -15,8 +17,44 @@ const clients = {}
 const readyUsers = {}
 const qrCodes = {}
 const lastRequest = {}
+const qrAttempts = {}
 
 const SESSION_PATH = path.join(__dirname, '.wwebjs_auth')
+
+function resolveExecutablePath() {
+    const candidates = []
+
+    const envPath = process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_BIN
+    if (envPath) candidates.push(envPath)
+
+    if (process.platform === 'win32') {
+        candidates.push(
+            'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+            'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe'
+        )
+
+        if (process.env.LOCALAPPDATA) {
+            candidates.push(
+                path.join(
+                    process.env.LOCALAPPDATA,
+                    'Google',
+                    'Chrome',
+                    'Application',
+                    'chrome.exe'
+                )
+            )
+        }
+    } else {
+        candidates.push(
+            '/usr/bin/chromium',
+            '/usr/bin/chromium-browser',
+            '/usr/bin/google-chrome',
+            '/usr/bin/google-chrome-stable'
+        )
+    }
+
+    return candidates.find((p) => p && fs.existsSync(p))
+}
 
 function clearWhatsAppData() {
     const authPath = path.join(__dirname, '.wwebjs_auth')
@@ -140,24 +178,28 @@ function createClient(dni) {
     }
 
     cleanLocks(dni)
+    qrAttempts[dni] = 0
 
-    const executablePath =
-        process.env.PUPPETEER_EXECUTABLE_PATH ||
-        process.env.CHROME_BIN ||
-        '/usr/bin/chromium'
+    const executablePath = resolveExecutablePath()
+    const puppeteerOptions = {
+        headless: 'new',
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--no-zygote'
+        ]
+    }
+
+    if (executablePath) {
+        puppeteerOptions.executablePath = executablePath
+    }
 
     const client = new Client({
         authStrategy: new LocalAuth({ clientId: dni, dataPath: SESSION_PATH }),
         puppeteer: {
-            headless: 'new',
-            executablePath,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--no-zygote'
-            ]
+            ...puppeteerOptions
         }
     })
 
@@ -182,6 +224,7 @@ function createClient(dni) {
                 delete clients[dni]
                 delete readyUsers[dni]
                 delete qrCodes[dni]
+                delete qrAttempts[dni]
             }
 
             // ⚠️ NO borrar sesión aquí automáticamente
@@ -189,6 +232,32 @@ function createClient(dni) {
     }, timeoutMs)
 
     client.on('qr', async (qr) => {
+        const maxQrAttempts = Number.parseInt(process.env.MAX_QR_ATTEMPTS ?? '5', 10)
+        const max = Number.isFinite(maxQrAttempts) && maxQrAttempts > 0 ? maxQrAttempts : 5
+
+        qrAttempts[dni] = (qrAttempts[dni] ?? 0) + 1
+
+        if (qrAttempts[dni] > max) {
+            console.log(`🛑 Límite QR alcanzado ${dni}`)
+            readyUsers[dni] = false
+            qrCodes[dni] = null
+
+            try {
+                const sessionPath = path.join(SESSION_PATH, `session-${dni}`)
+                fs.rmSync(sessionPath, { recursive: true, force: true })
+            } catch {}
+
+            try {
+                await client.destroy()
+            } catch {}
+
+            delete clients[dni]
+            delete readyUsers[dni]
+            delete qrCodes[dni]
+            delete qrAttempts[dni]
+            return
+        }
+
         console.log(`📱 QR generado ${dni}`)
         qrCodes[dni] = await QRCode.toDataURL(qr)
     })
@@ -196,6 +265,7 @@ function createClient(dni) {
     client.on('authenticated', () => {
         connected = true
         clearTimeout(timeout)
+        qrAttempts[dni] = 0
         console.log(`🔐 ${dni} autenticado`)
     })
 
@@ -206,6 +276,7 @@ function createClient(dni) {
         console.log(`✅ ${dni} conectado`)
         readyUsers[dni] = true
         qrCodes[dni] = null
+        qrAttempts[dni] = 0
     })
 
     client.on('auth_failure', async () => {
@@ -223,6 +294,7 @@ function createClient(dni) {
         } catch {}
 
         delete clients[dni]
+        delete qrAttempts[dni]
     })
 
     client.on('disconnected', () => {
@@ -240,6 +312,7 @@ function createClient(dni) {
         delete clients[dni]
         delete readyUsers[dni]
         delete qrCodes[dni]
+        delete qrAttempts[dni]
     })
 }
 
@@ -247,6 +320,10 @@ const URL_OSIPTEL = process.env.URL_OSIPTEL
 const TOKEN_OSIPTEL = process.env.TOKEN_OSIPTEL
 
 async function getCelPhone(dni) {
+    if (!URL_OSIPTEL || !TOKEN_OSIPTEL) {
+        throw new Error('OSIPTEL no configurado (URL_OSIPTEL/TOKEN_OSIPTEL)')
+    }
+
     try {
         const response = await axios.get(`${URL_OSIPTEL}${dni}?token=${TOKEN_OSIPTEL}`)
 
@@ -450,7 +527,7 @@ app.get('/verificar-dni', async (req, res) => {
     try {
         data = await getCelPhone(dni)
     } catch (err) {
-        return res.json({ error: 'Error obteniendo datos' })
+        return res.json({ error: err?.message || 'Error obteniendo datos' })
     }
 
     if (!data.datos) {
